@@ -3,9 +3,9 @@
 # CCCL version 2.8.5
 # https://github.com/NVIDIA/cccl/releases/tag/v2.8.5
 _CCCL_GITHUB_ARCHIVE = {
-    "full_path": "https://github.com/NVIDIA/cccl/releases/download/v2.8.5/cccl-src-v2.8.5.tar.gz",
-    "sha256": "631cb620e78904fb30f4ef6e033efb7716af1934bc170dce9cbbf4cc48777ca2",
-    "strip_prefix": "cccl-src-v2.8.5",
+    "full_path": "https://github.com/NVIDIA/cccl/archive/refs/tags/v3.2.0.tar.gz",
+    "sha256": "5e69383b2f3355291c7ca66625448d87686360c84c347a37ad439bb48fbea8e8",
+    "strip_prefix": "v3.2.0",
 }
 
 CCCL_DIST_DICT = {
