@@ -1,7 +1,7 @@
 """ Provides the CCCL headers for CUDA. """
 
-# CCCL version 2.8.5
-# https://github.com/NVIDIA/cccl/releases/tag/v2.8.5
+# CCCL version 3.2.0
+# https://github.com/NVIDIA/cccl/releases/tag/v3.2.0
 _CCCL_GITHUB_ARCHIVE = {
     "full_path": "https://github.com/NVIDIA/cccl/archive/refs/tags/v3.2.0.tar.gz",
     "sha256": "5e69383b2f3355291c7ca66625448d87686360c84c347a37ad439bb48fbea8e8",
@@ -22,9 +22,10 @@ CCCL_GITHUB_VERSIONS_TO_BUILD_TEMPLATES = {
             "any": "@rules_ml_toolchain//gpu/cuda/build_templates:cuda_cccl_github.BUILD.tpl",
         },
         "local": {
-            "source_dirs": ["include", "lib"],
+            "local_path_env_var": "LOCAL_CCCL_PATH",
+            "source_dirs": ["thrust", "libcudacxx", "cub"],
             "version_to_template": {
-                "any": "@rules_ml_toolchain//gpu/cuda/build_templates:cuda_cccl.BUILD.tpl",
+                "any": "@rules_ml_toolchain//gpu/cuda/build_templates:cuda_cccl_github.BUILD.tpl",
             },
         },
     },
