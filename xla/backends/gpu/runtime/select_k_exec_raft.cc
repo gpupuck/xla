@@ -111,7 +111,7 @@ class XlaDeviceMemoryResource : public rmm::mr::device_memory_resource {
   }
 
  protected:
-  void* do_allocate(std::size_t bytes, rmm::cuda_stream_view stream) noexcept override {
+  void* do_allocate(std::size_t bytes, rmm::cuda_stream_view stream) override {
     auto mem = scratch_allocator_.AllocateBytes(bytes);
     if (!mem.ok()) {
       // RMM expects exceptions
