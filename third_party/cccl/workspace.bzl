@@ -4,7 +4,7 @@
 # https://github.com/NVIDIA/cccl/releases/tag/v3.2.0
 _CCCL_GITHUB_ARCHIVE = {
     "full_path": "https://github.com/NVIDIA/cccl/releases/download/v3.2.0/cccl-src-v3.2.0.tar.gz",
-    "sha256": "631cb620e78904fb30f4ef6e033efb7716af1934bc170dce9cbbf4cc48777ca2",
+    "sha256": "b5cd66e240201f5a06af2a75eaffdf05a6c63829edada33ff569ada0037f8086",
     "strip_prefix": "cccl-src-v3.2.0",
 }
 
