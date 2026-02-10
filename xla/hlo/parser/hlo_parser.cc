@@ -536,6 +536,8 @@ class HloParserImpl : public HloParser {
       std::unique_ptr<CollectiveDeviceListBase>* device_list);
   bool ParseFrontendAttributes(FrontendAttributes* frontend_attributes);
   bool ParseStatisticsViz(StatisticsViz* statistics_viz);
+  bool ParseIotaTileAssignmentArray(std::vector<int64_t>& iota_reshape_dims,
+                                    std::vector<int>& iota_transpose_perm);
   bool ParseTileAssignment(std::vector<int64_t>& tile_assignment_dimensions,
                            std::vector<int64_t>& iota_reshape_dims,
                            std::vector<int>& iota_transpose_perm,
@@ -2736,29 +2738,27 @@ HloInstruction* HloParserImpl::CreateInstruction(  // NOLINT
           HloInstruction::CreateMap(*shape, operands, *to_apply));
     }
     case HloOpcode::kScan: {
+      if (!preset_operands && !ParseOperands(&operands, builder)) {
+        return nullptr;
+      }
+
       optional<HloComputation*> to_apply;
       attrs["to_apply"] = {/*required=*/true, AttrTy::kHloComputation,
                            &to_apply};
       optional<std::vector<int64_t>> dimensions;
       attrs["dimensions"] = {/*required=*/true, AttrTy::kBracedInt64List,
                              &dimensions};
+      optional<int64_t> num_carries;
+      attrs["num_carries"] = {/*required=*/true, AttrTy::kInt64, &num_carries};
       optional<bool> is_reverse = false;
       attrs["is_reverse"] = {/*required=*/false, AttrTy::kBool, &is_reverse};
       optional<bool> is_associative = false;
       attrs["is_associative"] = {/*required=*/false, AttrTy::kBool,
                                  &is_associative};
-      if ((!preset_operands && !ParseOperands(&operands, builder)) ||
-          !ParseAttributes(attrs, allow_attributes, shape)) {
-        return nullptr;
-      }
-      if (dimensions->empty()) {
-        TokenError("expects at least 1 dimension");
+      if (!ParseAttributes(attrs, allow_attributes, shape)) {
         return nullptr;
       }
 
-      // Infer num_carries by matching the operands from the right to the
-      // parameters of to_apply.
-      int64_t num_carries = 0;
       HloComputation* computation = *to_apply;
       if (operands.size() != computation->num_parameters()) {
         TokenError(StrCat("expects ", operands.size(),
@@ -2767,61 +2767,57 @@ HloInstruction* HloParserImpl::CreateInstruction(  // NOLINT
                           computation->num_parameters(), " parameters"));
         return nullptr;
       }
-      for (int i = operands.size() - 1; i >= 0; --i) {
-        if (ShapeUtil::Compatible(
-                operands[i]->shape(),
-                computation->parameter_instruction(i)->shape())) {
-          num_carries++;
-        } else {
-          break;
-        }
-      }
 
-      if (num_carries == 0) {
-        TokenError("expects at least one carry operand");
+      if (dimensions->size() != 1) {
+        TokenError("expects exactly one dimension");
         return nullptr;
       }
-      if (num_carries == operands.size()) {
-        TokenError("expects at least one input operand");
+      int64_t scan_dim = dimensions->at(0);
+
+      if (operands.size() < *num_carries) {
+        TokenError(StrCat("expects at least ", *num_carries,
+                          " operands to match the number of carries, but has ",
+                          operands.size(), " operands"));
         return nullptr;
       }
+      int64_t num_inputs = operands.size() - *num_carries;
 
       if (!maybe_infer_shape([&]() -> absl::StatusOr<Shape> {
-            int64_t num_inputs = operands.size() - num_carries;
-            const Shape& root_shape =
-                to_apply.value()->root_instruction()->shape();
-            if (!root_shape.IsTuple()) {
-              return InvalidArgument("Scan computation result must be a tuple");
+            if (num_inputs == 0) {
+              return InvalidArgument(
+                  "Cannot infer shape for scan with no inputs");
             }
 
-            if (root_shape.tuple_shapes().size() != operands.size()) {
-              return InvalidArgument(
-                  "Scan computation result must be a tuple of size %d",
-                  operands.size());
+            int64_t scan_dim_size = operands[0]->shape().dimensions(scan_dim);
+            const Shape& root_shape = computation->root_instruction()->shape();
+            if (!root_shape.IsTuple()) {
+              if (*num_carries > 0) {
+                return root_shape;
+              }
+              return ShapeUtil::InsertDimensionAtIndex(root_shape, scan_dim,
+                                                       scan_dim_size);
             }
 
             std::vector<Shape> result_shapes;
-            result_shapes.reserve(operands.size());
-            for (int i = 0; i < num_inputs; ++i) {
-              const Shape& input_shape = operands[i]->shape();
-              Shape output_shape = input_shape;
-              output_shape.set_element_type(
-                  root_shape.tuple_shapes(i).element_type());
-              result_shapes.push_back(output_shape);
-            }
-            for (int i = num_inputs; i < operands.size(); ++i) {
-              result_shapes.push_back(root_shape.tuple_shapes(i));
+            const std::vector<Shape>& root_shapes = root_shape.tuple_shapes();
+            result_shapes.reserve(root_shapes.size());
+            for (int i = 0; i < root_shapes.size(); ++i) {
+              Shape result_shape = root_shapes[i];
+              if (i + *num_carries < root_shapes.size()) {
+                result_shape = ShapeUtil::InsertDimensionAtIndex(
+                    result_shape, scan_dim, scan_dim_size);
+              }
+              result_shapes.emplace_back(std::move(result_shape));
             }
             return ShapeUtil::MakeTupleShape(result_shapes);
           })) {
         return nullptr;
       }
 
-      int64_t num_inputs = operands.size() - num_carries;
       return builder->AddInstruction(HloInstruction::CreateScan(
           *shape, absl::MakeSpan(operands).subspan(0, num_inputs),
-          absl::MakeSpan(operands).subspan(num_inputs, num_carries), *to_apply,
-          dimensions->at(0), *is_reverse,
+          absl::MakeSpan(operands).subspan(num_inputs, *num_carries),
+          computation, scan_dim, *is_reverse,
           *is_associative ? TRI_STATE_TRUE : TRI_STATE_FALSE));
     }
     case HloOpcode::kReduce: {
@@ -3980,6 +3976,62 @@ bool HloParserImpl::ParseStatisticsViz(StatisticsViz* statistics_viz) {
   return ParseToken(TokKind::kRbrace, "expects '}' at the end of statistics");
 }
 
+bool HloParserImpl::ParseIotaTileAssignmentArray(
+    std::vector<int64_t>& iota_reshape_dims,
+    std::vector<int>& iota_transpose_perm) {
+  if (!ParseToken(TokKind::kLsquare,
+                  "expected '[' to start sharding iota_reshape_dims")) {
+    return false;
+  }
+  do {
+    int64_t dim;
+    if (!ParseInt64(&dim)) {
+      return false;
+    }
+    iota_reshape_dims.push_back(dim);
+  } while (EatIfPresent(TokKind::kComma));
+  if (iota_reshape_dims.empty()) {
+    return TokenError("expected non-empty iota_reshape_dims");
+  }
+  if (!ParseToken(TokKind::kRsquare,
+                  "expected ']' to end sharding iota_reshape_dims")) {
+    return false;
+  }
+  if (iota_reshape_dims.size() == 1) {
+    iota_transpose_perm.push_back(0);
+  } else {
+    if (lexer_.GetKind() != TokKind::kIdent || lexer_.GetStrVal() != "T") {
+      return TokenError(
+          "expected 'T(' to start sharding devices iota_transpose_perm");
+    }
+    lexer_.Lex();
+    if (!ParseToken(
+            TokKind::kLparen,
+            "expected 'T(' to start sharding devices iota_transpose_perm")) {
+      return false;
+    }
+    do {
+      int64_t dim;
+      if (!ParseInt64(&dim)) {
+        return false;
+      }
+      if (dim >= iota_reshape_dims.size()) {
+        return TokenError(
+            absl::StrFormat("Out of range iota minor_to_major value %lld, "
+                            "expecting value in range [0, %d)",
+                            dim, iota_reshape_dims.size()));
+      }
+      iota_transpose_perm.push_back(dim);
+    } while (EatIfPresent(TokKind::kComma));
+    if (!ParseToken(
+            TokKind::kRparen,
+            "expected ')' to end sharding devices iota_transpose_perm")) {
+      return false;
+    }
+  }
+  return true;
+}
+
 // devices argument is optional: if not present, the tile assignment is assumed
 // to be an iota tile assignment.
 bool HloParserImpl::ParseTileAssignment(
@@ -4005,54 +4057,8 @@ bool HloParserImpl::ParseTileAssignment(
   }
   if (lexer_.GetKind() == TokKind::kLeq) {
     lexer_.Lex();
-    if (!ParseToken(TokKind::kLsquare,
-                    "expected '[' to start sharding iota_reshape_dims")) {
+    if (!ParseIotaTileAssignmentArray(iota_reshape_dims, iota_transpose_perm)) {
       return false;
-    }
-    do {
-      int64_t dim;
-      if (!ParseInt64(&dim)) {
-        return false;
-      }
-      iota_reshape_dims.push_back(dim);
-    } while (EatIfPresent(TokKind::kComma));
-    if (iota_reshape_dims.empty()) {
-      return TokenError("expected non-empty iota_reshape_dims");
-    }
-    if (!ParseToken(TokKind::kRsquare,
-                    "expected ']' to end sharding iota_reshape_dims")) {
-      return false;
-    }
-    if (iota_reshape_dims.size() == 1) {
-      iota_transpose_perm.push_back(0);
-    } else {
-      if (lexer_.GetKind() != TokKind::kIdent || lexer_.GetStrVal() != "T") {
-        return TokenError(
-            "expected 'T(' to start sharding devices "
-            "iota_transpose_perm");
-      }
-      lexer_.Lex();
-      if (!ParseToken(TokKind::kLparen,
-                      "expected 'T(' to start sharding devices "
-                      "iota_transpose_perm")) {
-        return false;
-      }
-      do {
-        int64_t dim;
-        if (!ParseInt64(&dim)) {
-          return false;
-        }
-        if (dim >= iota_reshape_dims.size()) {
-          return TokenError(absl::StrFormat(
-              "Out of range iota minor_to_major value %lld.", dim));
-        }
-        iota_transpose_perm.push_back(dim);
-      } while (EatIfPresent(TokKind::kComma));
-      if (!ParseToken(TokKind::kRparen,
-                      "expected ')' to end sharding devices "
-                      "iota_transpose_perm")) {
-        return false;
-      }
     }
   } else {
     if (!devices) {
